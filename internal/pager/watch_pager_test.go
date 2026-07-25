@@ -51,7 +51,7 @@ func TestKittyApplyContentRebuildsSegments(t *testing.T) {
 	images := [][]byte{img}
 
 	// Start with a text-only document.
-	p := newLessKittyState("a\nb\nc\nd", nil, nil, 10, 5)
+	p := newLessKittyState("a\nb\nc\nd", nil, nil, nil, 10, 5)
 	if p.totalRows != 4 {
 		t.Fatalf("initial totalRows=%d, want 4", p.totalRows)
 	}

@@ -7,6 +7,11 @@ permissions:
 
 jobs:
   dependency-review:
+    # GitHub does not populate the dependency graph for forks, so the action
+    # this job runs always fails there ("Dependency review is not supported on
+    # this repository") regardless of what a pull request changes. Skipping on
+    # forks keeps the gate intact upstream while letting fork CI go green.
+    if: ${{ !github.event.repository.fork }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
