@@ -36,15 +36,17 @@ const (
 
 // PageLessKitty pages output (which still contains the raw marker lines, not
 // baked-in image escapes) in less mode with smooth image scrolling. images is
-// indexed by marker order; widthCells is the render width used to size images.
-func PageLessKitty(output string, markers []string, images [][]byte, widthCells int) error {
+// indexed by marker order; widthCells is the render width used to size images,
+// and maxWidths optionally caps individual images so a small one is not
+// upscaled to fill the terminal.
+func PageLessKitty(output string, markers []string, images [][]byte, maxWidths []int, widthCells int) error {
 	if !term.IsTerminal(int(os.Stdout.Fd())) {
 		// Not a terminal: fall back to a plain dump with full images inlined.
-		return printOutput(termimage.ReplaceMarkersWithImages(output, markers, images, termimage.FormatKitty, widthCells))
+		return printOutput(termimage.ReplaceMarkersWithImages(output, markers, images, maxWidths, termimage.FormatKitty, widthCells))
 	}
 	height := terminalHeight()
 	if height <= 0 {
-		return printOutput(termimage.ReplaceMarkersWithImages(output, markers, images, termimage.FormatKitty, widthCells))
+		return printOutput(termimage.ReplaceMarkersWithImages(output, markers, images, maxWidths, termimage.FormatKitty, widthCells))
 	}
 
 	reader, shouldClose := openTTYReader()
@@ -54,7 +56,7 @@ func PageLessKitty(output string, markers []string, images [][]byte, widthCells 
 
 	oldState, err := term.MakeRaw(int(reader.Fd()))
 	if err != nil {
-		return printOutput(termimage.ReplaceMarkersWithImages(output, markers, images, termimage.FormatKitty, widthCells))
+		return printOutput(termimage.ReplaceMarkersWithImages(output, markers, images, maxWidths, termimage.FormatKitty, widthCells))
 	}
 	defer term.Restore(int(reader.Fd()), oldState)
 	defer setupSignalHandler(int(reader.Fd()), oldState, func() {
@@ -68,7 +70,7 @@ func PageLessKitty(output string, markers []string, images [][]byte, widthCells 
 	fmt.Fprint(writer, ansiAltScreenOn)
 	defer fmt.Fprint(os.Stdout, kittyDeleteAll+ansiAltScreenOff)
 
-	p := newLessKittyState(output, markers, images, widthCells, height)
+	p := newLessKittyState(output, markers, images, maxWidths, widthCells, height)
 	p.redraw(writer)
 	prev := p.viewKey()
 	for {
@@ -105,6 +107,7 @@ type lessSeg struct {
 	plain   string // ANSI-stripped text, for search/highlight
 	imgIdx  int    // index into images, for image segments
 	rows    int    // display-row height
+	cells   int    // display width in columns, for image segments
 }
 
 type lessKittyState struct {
@@ -120,7 +123,7 @@ type lessKittyState struct {
 	status     string
 }
 
-func newLessKittyState(output string, markers []string, images [][]byte, widthCells, height int) *lessKittyState {
+func newLessKittyState(output string, markers []string, images [][]byte, maxWidths []int, widthCells, height int) *lessKittyState {
 	// Match the marker-replacement convention in termimage: a line is an image
 	// if its ANSI-stripped, space-trimmed text equals a marker string.
 	markerIdx := make(map[string]int, len(markers))
@@ -133,11 +136,15 @@ func newLessKittyState(output string, markers []string, images [][]byte, widthCe
 	for _, line := range rawLines {
 		trimmed := strings.TrimSpace(stripANSI(line))
 		if idx, ok := markerIdx[trimmed]; ok && idx < len(images) {
-			rows := termimage.ImageRows(images[idx], widthCells)
+			cells := widthCells
+			if idx < len(maxWidths) {
+				cells = termimage.DisplayWidthCells(widthCells, maxWidths[idx])
+			}
+			rows := termimage.ImageRows(images[idx], cells)
 			if rows < 1 {
 				rows = 1
 			}
-			segs = append(segs, lessSeg{isImage: true, imgIdx: idx, rows: rows})
+			segs = append(segs, lessSeg{isImage: true, imgIdx: idx, rows: rows, cells: cells})
 			continue
 		}
 		segs = append(segs, lessSeg{text: line, plain: trimmed, rows: 1})
@@ -163,7 +170,7 @@ func newLessKittyState(output string, markers []string, images [][]byte, widthCe
 // applyContent rebuilds the pager from freshly rendered content (used by watch
 // mode), preserving the current scroll position and active search.
 func (p *lessKittyState) applyContent(c Content) {
-	np := newLessKittyState(c.Output, c.Markers, c.Images, c.WidthCells, p.height)
+	np := newLessKittyState(c.Output, c.Markers, c.Images, c.MaxWidths, c.WidthCells, p.height)
 	p.segs = np.segs
 	p.images = np.images
 	p.widthCells = np.widthCells
@@ -229,7 +236,7 @@ func (p *lessKittyState) redraw(w *bufio.Writer) {
 			if show > remaining {
 				show = remaining
 			}
-			fmt.Fprint(w, termimage.EncodeKittyCrop(p.images[seg.imgIdx], p.widthCells, seg.rows, off, show))
+			fmt.Fprint(w, termimage.EncodeKittyCrop(p.images[seg.imgIdx], seg.cells, seg.rows, off, show))
 			screenRow += show
 			remaining -= show
 		} else {

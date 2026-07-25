@@ -147,3 +147,29 @@ func TestRead_FileTooLarge(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestBaseDir_File(t *testing.T) {
+	if got := BaseDir([]string{filepath.Join("docs", "guide.md")}); got != "docs" {
+		t.Fatalf("expected %q, got %q", "docs", got)
+	}
+}
+
+func TestBaseDir_FileInCurrentDir(t *testing.T) {
+	if got := BaseDir([]string{"README.md"}); got != "." {
+		t.Fatalf("expected %q, got %q", ".", got)
+	}
+}
+
+// A document read from stdin has no directory of its own, so relative
+// references resolve against the working directory.
+func TestBaseDir_Stdin(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{nil, {}, {"-"}} {
+		if got := BaseDir(args); got != wd {
+			t.Fatalf("args %v: expected %q, got %q", args, wd, got)
+		}
+	}
+}

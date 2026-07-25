@@ -21,9 +21,12 @@ import (
 // populated; for the text path, Output is the final rendered text and the image
 // fields are empty.
 type Content struct {
-	Output     string
-	Markers    []string
-	Images     [][]byte
+	Output  string
+	Markers []string
+	Images  [][]byte
+	// MaxWidths optionally caps each image's display width, indexed like
+	// Images. A zero entry, or a short slice, means the full render width.
+	MaxWidths  []int
 	WidthCells int
 }
 
@@ -122,11 +125,11 @@ func runReload(
 // PageLessKittyWatch runs the smooth Kitty pager in watch mode.
 func PageLessKittyWatch(initial Content, reload <-chan struct{}, render RenderFunc) error {
 	if !term.IsTerminal(int(os.Stdout.Fd())) {
-		return printOutput(termimage.ReplaceMarkersWithImages(initial.Output, initial.Markers, initial.Images, termimage.FormatKitty, initial.WidthCells))
+		return printOutput(termimage.ReplaceMarkersWithImages(initial.Output, initial.Markers, initial.Images, initial.MaxWidths, termimage.FormatKitty, initial.WidthCells))
 	}
 	height := terminalHeight()
 	if height <= 0 {
-		return printOutput(termimage.ReplaceMarkersWithImages(initial.Output, initial.Markers, initial.Images, termimage.FormatKitty, initial.WidthCells))
+		return printOutput(termimage.ReplaceMarkersWithImages(initial.Output, initial.Markers, initial.Images, initial.MaxWidths, termimage.FormatKitty, initial.WidthCells))
 	}
 
 	reader, shouldClose := openTTYReader()
@@ -135,7 +138,7 @@ func PageLessKittyWatch(initial Content, reload <-chan struct{}, render RenderFu
 	}
 	oldState, err := term.MakeRaw(int(reader.Fd()))
 	if err != nil {
-		return printOutput(termimage.ReplaceMarkersWithImages(initial.Output, initial.Markers, initial.Images, termimage.FormatKitty, initial.WidthCells))
+		return printOutput(termimage.ReplaceMarkersWithImages(initial.Output, initial.Markers, initial.Images, initial.MaxWidths, termimage.FormatKitty, initial.WidthCells))
 	}
 	defer term.Restore(int(reader.Fd()), oldState)
 	defer setupSignalHandler(int(reader.Fd()), oldState, func() {
@@ -148,7 +151,7 @@ func PageLessKittyWatch(initial Content, reload <-chan struct{}, render RenderFu
 	fmt.Fprint(writer, ansiAltScreenOn)
 	defer fmt.Fprint(os.Stdout, kittyDeleteAll+ansiAltScreenOff)
 
-	p := newLessKittyState(initial.Output, initial.Markers, initial.Images, initial.WidthCells, height)
+	p := newLessKittyState(initial.Output, initial.Markers, initial.Images, initial.MaxWidths, initial.WidthCells, height)
 	runReload(bufReader, reload, render,
 		func(r io.ByteReader) bool { return p.handleKey(readKittyKey(r, writer, p)) },
 		func(c Content) { p.applyContent(c) },

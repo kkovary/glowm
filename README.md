@@ -17,6 +17,7 @@ Many engineering teams keep architecture notes, runbooks, ADRs, and design docum
 `glowm` keeps the whole workflow in your terminal:
 
 - **Inline Mermaid diagrams** on iTerm2, Kitty, and Ghostty
+- **Inline images** for the PNGs and screenshots your docs already reference
 - **PDF export** for Mermaid diagrams when you need an artifact
 - **Pager-first reading** for long documentation files
 - **STDIN support** for piping generated docs or command output
@@ -70,12 +71,47 @@ On other terminals, Mermaid blocks gracefully fall back to code blocks.
 
 Chrome or Chromium is required for Mermaid rendering and PDF export.
 
+## Image rendering
+
+On those same terminals, Markdown image references are rendered inline too, so
+screenshots and diagrams next to your docs show up without a browser:
+
+```markdown
+![architecture](docs/architecture.png)
+```
+
+PNG, JPEG, and GIF are supported (the first frame, for animated GIFs). Relative
+paths resolve against the document's own directory, so a doc renders the same
+from any working directory; paths in a document read from STDIN resolve against
+the current directory. Chrome is not involved, so image-only documents render
+without it.
+
+An image is rendered inline when the reference is the only thing on its line:
+
+```markdown
+![this renders as an image](diagram.png)
+
+This ![one stays as text](diagram.png) because prose surrounds it.
+```
+
+That restriction is deliberate. A terminal image occupies whole rows, so it
+cannot sit inside a line of wrapped prose, a list item, or a table cell. In
+those positions, and on terminals without image support, the reference falls
+back to the usual link text. A reference that cannot be loaded (a missing file,
+or a remote `https://` URL, which is not fetched) renders as
+`[image: alt (path)]` with a warning on stderr, leaving the rest of the
+document intact.
+
+Large images are downscaled to the display width before encoding, which keeps
+the escape sequence small without any visible loss.
+
 ## Comparison
 
 | Feature | glowm | Glow | Browser preview | VS Code preview |
 | --- | --- | --- | --- | --- |
 | Terminal Markdown reading | ✅ | ✅ | ❌ | ❌ |
 | Inline Mermaid diagrams in terminal | ✅ | ❌ | ❌ | ❌ |
+| Inline Markdown images in terminal | ✅ | ❌ | ✅ | ✅ |
 | Mermaid PDF export | ✅ | ❌ | Varies | Varies |
 | Works with STDIN / pipes | ✅ | ✅ | ❌ | ❌ |
 | Good for SSH / terminal-only workflows | ✅ | ✅ | ❌ | ❌ |
@@ -166,7 +202,7 @@ Color theme for rendered Mermaid diagrams, applied to both inline images and
 
 - Go, when installing from source
 - Chrome or Chromium, required for Mermaid rendering and PDF export
-- A terminal with image support for inline diagrams: iTerm2, Kitty, or Ghostty
+- A terminal with image support for inline diagrams and images: iTerm2, Kitty, or Ghostty
 
 ## Launch notes
 

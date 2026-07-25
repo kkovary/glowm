@@ -140,7 +140,7 @@ func TestKittyNewStateParsesMarkers(t *testing.T) {
 	images := [][]byte{img}
 	output := "line one\n@@IMG0@@\nline three"
 
-	p := newLessKittyState(output, markers, images, 10, 5)
+	p := newLessKittyState(output, markers, images, nil, 10, 5)
 	if len(p.segs) != 3 {
 		t.Fatalf("segs=%d, want 3", len(p.segs))
 	}
@@ -149,5 +149,38 @@ func TestKittyNewStateParsesMarkers(t *testing.T) {
 	}
 	if p.totalRows != 4 { // 1 + 2 + 1
 		t.Fatalf("totalRows=%d, want 4", p.totalRows)
+	}
+}
+
+// A per-image width cap has to reach the row calculation, or the pager will
+// reserve the wrong number of rows for a small image.
+func TestKittyNewStateAppliesWidthCap(t *testing.T) {
+	// A 100x40 PNG capped at 4 cells => rows = ceil((40/100)*4/2) = 1.
+	img := makeKittyTestPNG(t, 100, 40)
+	markers := []string{"@@IMG0@@"}
+	images := [][]byte{img}
+	output := "line one\n@@IMG0@@\nline three"
+
+	p := newLessKittyState(output, markers, images, []int{4}, 10, 5)
+	if !p.segs[1].isImage {
+		t.Fatalf("segs[1]=%+v, want an image segment", p.segs[1])
+	}
+	if p.segs[1].cells != 4 {
+		t.Fatalf("cells=%d, want the capped width 4", p.segs[1].cells)
+	}
+	if p.segs[1].rows != 1 {
+		t.Fatalf("rows=%d, want 1 for the capped width", p.segs[1].rows)
+	}
+}
+
+// A cap wider than the render width must not widen the image past it.
+func TestKittyNewStateIgnoresCapWiderThanWidth(t *testing.T) {
+	img := makeKittyTestPNG(t, 100, 40)
+	p := newLessKittyState("@@IMG0@@", []string{"@@IMG0@@"}, [][]byte{img}, []int{999}, 10, 5)
+	if p.segs[0].cells != 10 {
+		t.Fatalf("cells=%d, want the render width 10", p.segs[0].cells)
+	}
+	if p.segs[0].rows != 2 {
+		t.Fatalf("rows=%d, want 2", p.segs[0].rows)
 	}
 }

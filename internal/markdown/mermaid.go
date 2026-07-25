@@ -25,9 +25,34 @@ func ExtractMermaidWithMarkers(md string) (MermaidResult, error) {
 }
 
 func extractMermaid(md string, keepBlocks bool, useMarkers bool) (MermaidResult, error) {
-	var out strings.Builder
-	var blocks []string
+	res, err := extract(md, extractConfig{keepBlocks: keepBlocks, useMarkers: useMarkers})
+	if err != nil {
+		return MermaidResult{}, err
+	}
+	blocks, _ := res.MermaidBlocks()
 	var markers []string
+	if useMarkers {
+		markers = res.Markers()
+	}
+	return MermaidResult{Blocks: blocks, Markdown: res.Markdown, Markers: markers}, nil
+}
+
+// extractConfig controls what extract pulls out of the document.
+type extractConfig struct {
+	// keepBlocks leaves mermaid source in the output as a fenced code block
+	// instead of substituting a placeholder or marker.
+	keepBlocks bool
+	// useMarkers substitutes unique markers rather than static placeholder
+	// text, so the caller can splice rendered images in afterwards.
+	useMarkers bool
+	// withImages additionally replaces standalone image references with
+	// markers.
+	withImages bool
+}
+
+func extract(md string, cfg extractConfig) (MediaResult, error) {
+	var out strings.Builder
+	var items []MediaItem
 
 	scanner := bufio.NewScanner(strings.NewReader(md))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -39,7 +64,7 @@ func extractMermaid(md string, keepBlocks bool, useMarkers bool) (MermaidResult,
 	// Deferred marker: only written to output when fence closes successfully.
 	var pendingLine string
 	var originalFenceLine string
-	markerIdx := -1
+	itemIdx := -1
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -52,12 +77,15 @@ func extractMermaid(md string, keepBlocks bool, useMarkers bool) (MermaidResult,
 				fence = f
 				info := strings.TrimSpace(stripped[len(f):])
 				isMermaid = strings.HasPrefix(info, "mermaid")
-				if isMermaid && !keepBlocks {
+				if isMermaid {
+					itemIdx = len(items)
+					items = append(items, MediaItem{Kind: KindMermaid})
+				}
+				if isMermaid && !cfg.keepBlocks {
 					originalFenceLine = line
-					if useMarkers {
-						marker := MarkerPrefix + strconv.Itoa(len(markers))
-						markerIdx = len(markers)
-						markers = append(markers, marker)
+					if cfg.useMarkers {
+						marker := MarkerPrefix + strconv.Itoa(itemIdx)
+						items[itemIdx].Marker = marker
 						pendingLine = marker + "\n"
 					} else {
 						pendingLine = Placeholder + "\n"
@@ -68,6 +96,25 @@ func extractMermaid(md string, keepBlocks bool, useMarkers bool) (MermaidResult,
 				}
 				continue
 			}
+			if cfg.withImages {
+				if alt, src, ok := matchImageLine(line); ok {
+					marker := ImageMarkerPrefix + strconv.Itoa(len(items))
+					items = append(items, MediaItem{
+						Kind:   KindImage,
+						Marker: marker,
+						Source: src,
+						Alt:    alt,
+					})
+					// Surround the marker with blank lines so it always forms
+					// its own paragraph. Without this an image on a line
+					// adjacent to text joins that paragraph, and the marker
+					// no longer occupies a line of its own after rendering.
+					out.WriteString("\n")
+					out.WriteString(marker)
+					out.WriteString("\n\n")
+					continue
+				}
+			}
 			out.WriteString(line)
 			out.WriteString("\n")
 			continue
@@ -76,14 +123,14 @@ func extractMermaid(md string, keepBlocks bool, useMarkers bool) (MermaidResult,
 		// in fence
 		if isFenceEnd(line, fence) {
 			if isMermaid {
-				blocks = append(blocks, strings.Join(current, "\n"))
+				items[itemIdx].Source = strings.Join(current, "\n")
 				if pendingLine != "" {
 					out.WriteString(pendingLine)
 					pendingLine = ""
 					originalFenceLine = ""
 				}
 			}
-			if !isMermaid || keepBlocks {
+			if !isMermaid || cfg.keepBlocks {
 				out.WriteString(line)
 				out.WriteString("\n")
 			}
@@ -91,13 +138,13 @@ func extractMermaid(md string, keepBlocks bool, useMarkers bool) (MermaidResult,
 			fence = ""
 			isMermaid = false
 			current = nil
-			markerIdx = -1
+			itemIdx = -1
 			continue
 		}
 
 		if inFence && isMermaid {
 			current = append(current, line)
-			if keepBlocks {
+			if cfg.keepBlocks {
 				out.WriteString(line)
 				out.WriteString("\n")
 			}
@@ -109,16 +156,18 @@ func extractMermaid(md string, keepBlocks bool, useMarkers bool) (MermaidResult,
 	}
 
 	if err := scanner.Err(); err != nil {
-		return MermaidResult{}, fmt.Errorf("scanning markdown: %w", err)
+		return MediaResult{}, fmt.Errorf("scanning markdown: %w", err)
 	}
 
-	// Unclosed mermaid fence: discard the block, restore original content.
+	// Unclosed mermaid fence: discard the block, restore original content. The
+	// pending item is always last, since nothing else is collected inside a
+	// fence.
 	if inFence && isMermaid {
-		if useMarkers && markerIdx >= 0 {
-			markers = markers[:markerIdx]
+		if itemIdx >= 0 {
+			items = items[:itemIdx]
 		}
 		pendingLine = ""
-		if !keepBlocks {
+		if !cfg.keepBlocks {
 			out.WriteString(originalFenceLine)
 			out.WriteString("\n")
 			for _, line := range current {
@@ -128,7 +177,7 @@ func extractMermaid(md string, keepBlocks bool, useMarkers bool) (MermaidResult,
 		}
 	}
 
-	return MermaidResult{Blocks: blocks, Markdown: out.String(), Markers: markers}, nil
+	return MediaResult{Markdown: out.String(), Items: items}, nil
 }
 
 // stripIndent removes up to 3 leading spaces per CommonMark fence indentation rules.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 const maxInputSize = 10 * 1024 * 1024 // 10 MB
@@ -36,6 +37,20 @@ func Read(args []string) (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// BaseDir returns the directory that relative references inside the document
+// resolve against: the input file's own directory, or the working directory
+// when the document came from stdin.
+func BaseDir(args []string) string {
+	if len(args) == 1 && args[0] != "-" {
+		return filepath.Dir(args[0])
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return wd
 }
 
 func readStdin() (string, error) {

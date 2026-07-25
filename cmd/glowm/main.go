@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/atani/glowm/internal/config"
+	"github.com/atani/glowm/internal/imageload"
 	"github.com/atani/glowm/internal/input"
 	"github.com/atani/glowm/internal/markdown"
 	"github.com/atani/glowm/internal/mermaid"
@@ -124,7 +126,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if stdoutTTY && imageFormat != termimage.FormatNone {
-		handled, code := runWithImages(md, opts, stdoutTTY, imageFormat, pagerMode, shouldUsePager, cfg.Mermaid.Theme, stdout, stderr)
+		baseDir := input.BaseDir(opts.positional)
+		handled, code := runWithImages(md, opts, baseDir, stdoutTTY, imageFormat, pagerMode, shouldUsePager, cfg.Mermaid.Theme, stdout, stderr)
 		if handled {
 			return code
 		}
@@ -182,24 +185,26 @@ func runPDF(md, mermaidTheme string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runWithImages renders markdown with inline terminal images. It returns
-// handled=false when there are no mermaid blocks or rendering fails, so the
-// caller can fall back to the text-only path.
-func runWithImages(md string, opts options, stdoutTTY bool, imageFormat termimage.Format, pagerMode pager.Mode, shouldUsePager bool, mermaidTheme string, stdout, stderr io.Writer) (handled bool, code int) {
-	result, err := markdown.ExtractMermaidWithMarkers(md)
+// runWithImages renders markdown with inline terminal images, covering both
+// mermaid diagrams and standalone markdown image references. It returns
+// handled=false when the document has no such media or nothing could be
+// rendered, so the caller can fall back to the text-only path.
+func runWithImages(md string, opts options, baseDir string, stdoutTTY bool, imageFormat termimage.Format, pagerMode pager.Mode, shouldUsePager bool, mermaidTheme string, stdout, stderr io.Writer) (handled bool, code int) {
+	result, err := markdown.ExtractMedia(md)
 	if err != nil {
 		return true, fail(stderr, err)
 	}
-	if len(result.Blocks) == 0 {
+	if len(result.Items) == 0 {
 		return false, 0
 	}
 	w := opts.width
 	if w == 0 {
 		w = terminal.StdoutWidth(80)
 	}
-	images, renderErr := mermaid.RenderPNGs(result.Blocks, w, effectiveMermaidTheme(mermaidTheme))
-	if renderErr != nil {
-		fmt.Fprintf(stderr, "warning: mermaid rendering failed: %v\n", renderErr)
+	images, maxWidths := renderMedia(result, w, baseDir, effectiveMermaidTheme(mermaidTheme), stderr)
+	if countRendered(images) == 0 {
+		// Nothing became an image. The text path renders mermaid source and
+		// image links more usefully than a document full of placeholders.
 		return false, 0
 	}
 	output, err := render.ANSI(result.Markdown, render.RenderOptions{
@@ -211,23 +216,27 @@ func runWithImages(md string, opts options, stdoutTTY bool, imageFormat termimag
 	if err != nil {
 		return true, fail(stderr, err)
 	}
+	// Substitute text for markers that cannot become images while the output
+	// is still free of base64 image payloads.
+	output = replaceStrandedMarkers(output, result.Items, images)
+	markers := result.Markers()
 	if shouldUsePager {
 		// less mode on a Kitty-graphics terminal scrolls images smoothly by
 		// cropping them per row, so it needs the raw images and the unmodified
 		// marker lines rather than pre-baked image escapes.
 		if pagerMode == pager.ModeLess && imageFormat == termimage.FormatKitty {
-			if err := pager.PageLessKitty(output, result.Markers, images, w); err != nil {
+			if err := pager.PageLessKitty(output, markers, images, maxWidths, w); err != nil {
 				return true, fail(stderr, err)
 			}
 			return true, 0
 		}
-		output = replaceMarkersForPagerMode(output, result.Markers, images, imageFormat, w, pagerMode)
+		output = replaceMarkersForPagerMode(output, markers, images, maxWidths, imageFormat, w, pagerMode)
 		if err := pager.PageWithMode(output, pagerMode); err != nil {
 			return true, fail(stderr, err)
 		}
 		return true, 0
 	}
-	output = termimage.ReplaceMarkersWithImages(output, result.Markers, images, imageFormat, w)
+	output = termimage.ReplaceMarkersWithImages(output, markers, images, maxWidths, imageFormat, w)
 	if _, err := fmt.Fprint(stdout, output); err != nil {
 		return true, fail(stderr, err)
 	}
@@ -244,6 +253,7 @@ func runWatch(path string, opts options, imageFormat termimage.Format, mermaidTh
 	}
 	kitty := imageFormat == termimage.FormatKitty
 	theme := effectiveMermaidTheme(mermaidTheme)
+	baseDir := input.BaseDir([]string{path})
 
 	// Resolve "auto" to a concrete style now, before the pager takes the
 	// terminal into raw mode. Re-rendering with "auto" on each reload would make
@@ -260,20 +270,26 @@ func runWatch(path string, opts options, imageFormat termimage.Format, mermaidTh
 			return pager.Content{}, err
 		}
 		if kitty {
-			res, err := markdown.ExtractMermaidWithMarkers(md)
+			res, err := markdown.ExtractMedia(md)
 			if err != nil {
 				return pager.Content{}, err
 			}
-			if len(res.Blocks) > 0 {
-				if images, rerr := mermaid.RenderPNGs(res.Blocks, w, theme); rerr == nil {
+			if len(res.Items) > 0 {
+				// Warnings are discarded here rather than written to stderr:
+				// reloads happen while the pager holds the alt screen, and
+				// printing into it would corrupt the frame. A reference that
+				// fails still shows its description in the document itself.
+				images, maxWidths := renderMedia(res, w, baseDir, theme, io.Discard)
+				if countRendered(images) > 0 {
 					out, err := render.ANSI(res.Markdown, render.RenderOptions{Width: w, Style: style, TTY: true, ShowLinkURLs: opts.showLinkURLs})
 					if err != nil {
 						return pager.Content{}, err
 					}
-					return pager.Content{Output: out, Markers: res.Markers, Images: images, WidthCells: w}, nil
+					out = replaceStrandedMarkers(out, res.Items, images)
+					return pager.Content{Output: out, Markers: res.Markers(), Images: images, MaxWidths: maxWidths, WidthCells: w}, nil
 				}
-				// Mermaid render failed; fall through to plain text rendering so
-				// diagrams degrade to code blocks rather than showing raw markers.
+				// Nothing rendered; fall through to plain text so diagrams
+				// degrade to code blocks rather than showing raw markers.
 			}
 		}
 		res, err := markdown.ExtractMermaid(md, true)
@@ -308,11 +324,164 @@ func runWatch(path string, opts options, imageFormat termimage.Format, mermaidTh
 	return 0
 }
 
-func replaceMarkersForPagerMode(output string, markers []string, images [][]byte, imageFormat termimage.Format, width int, pagerMode pager.Mode) string {
-	if pagerMode == pager.ModeMore || pagerMode == pager.ModeLess {
-		return termimage.ReplaceMarkersWithImagesForPager(output, markers, images, imageFormat, width)
+// renderMedia turns each media item into PNG bytes, returning slices indexed to
+// match result.Items. Items that could not be rendered are left nil and
+// reported on stderr.
+//
+// maxWidths caps the display width of individual images. Loaded images are
+// capped at their natural size so that a small image is not upscaled to fill
+// the terminal, while diagrams are left uncapped: they are rasterized to the
+// display width, and scaling one up keeps its labels legible.
+func renderMedia(result markdown.MediaResult, widthCells int, baseDir, mermaidTheme string, stderr io.Writer) (images [][]byte, maxWidths []int) {
+	images = make([][]byte, len(result.Items))
+	maxWidths = make([]int, len(result.Items))
+
+	// Mermaid diagrams render as one batch: each call drives a headless
+	// browser, so per-diagram calls would be far slower.
+	if blocks, indices := result.MermaidBlocks(); len(blocks) > 0 {
+		pngs, err := mermaid.RenderPNGs(blocks, widthCells, mermaidTheme)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: mermaid rendering failed: %v\n", err)
+		} else {
+			for i, idx := range indices {
+				if i < len(pngs) {
+					images[idx] = pngs[i]
+				}
+			}
+		}
 	}
-	return termimage.ReplaceMarkersWithImages(output, markers, images, imageFormat, width)
+
+	maxWidth, maxHeight := imageBounds(widthCells)
+	for i, item := range result.Items {
+		if item.Kind != markdown.KindImage {
+			continue
+		}
+		png, err := imageload.Load(item.Source, baseDir, maxWidth, maxHeight)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: image %q: %v\n", item.Source, err)
+			continue
+		}
+		images[i] = png
+		maxWidths[i] = termimage.NaturalWidthCells(png)
+	}
+	return images, maxWidths
+}
+
+// imageBounds returns the pixel dimensions a loaded image is downscaled to fit.
+// The width mirrors the mermaid viewport so both kinds of media are rasterized
+// at a comparable scale; anything wider is detail the terminal would discard
+// when scaling to the display width. The height allowance keeps tall
+// screenshots readable while still bounding the base64 payload.
+func imageBounds(widthCells int) (maxWidth, maxHeight int) {
+	const minWidth = 800
+	maxWidth = widthCells * 9
+	if maxWidth < minWidth {
+		maxWidth = minWidth
+	}
+	return maxWidth, maxWidth * 4
+}
+
+func countRendered(images [][]byte) int {
+	n := 0
+	for _, img := range images {
+		if len(img) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// replaceStrandedMarkers substitutes descriptive text for markers that will not
+// become an image, either because rendering failed or because the marker did
+// not survive rendering as a line of its own. Without this a marker would leak
+// into the output as literal text.
+//
+// Markers are matched against ANSI-stripped text, never the raw line: the
+// renderer splits a marker into separately styled runs at its underscores, so
+// the marker does not appear as a contiguous substring of the rendered output.
+func replaceStrandedMarkers(output string, items []markdown.MediaItem, images [][]byte) string {
+	pending := make(map[string]string, len(items))
+	for _, item := range items {
+		if item.Marker != "" {
+			pending[item.Marker] = fallbackText(item)
+		}
+	}
+	if len(pending) == 0 {
+		return output
+	}
+
+	lines := strings.Split(output, "\n")
+	stripped := make([]string, len(lines))
+	ownLine := make(map[string]bool, len(pending))
+	for i, line := range lines {
+		stripped[i] = termimage.StripANSI(line)
+		if trimmed := strings.TrimSpace(stripped[i]); trimmed != "" {
+			ownLine[trimmed] = true
+		}
+	}
+
+	// A marker that has both a rendered image and a line of its own is left
+	// alone, for the image substitution that follows to consume.
+	for i, item := range items {
+		if item.Marker == "" || i >= len(images) || len(images[i]) == 0 {
+			continue
+		}
+		if ownLine[item.Marker] {
+			delete(pending, item.Marker)
+		}
+	}
+	if len(pending) == 0 {
+		return output
+	}
+
+	// Longest first, so that replacing "GLOWM_IMAGE_1" cannot corrupt a
+	// "GLOWM_IMAGE_10" sharing the same line.
+	order := make([]string, 0, len(pending))
+	for marker := range pending {
+		order = append(order, marker)
+	}
+	sort.Slice(order, func(a, b int) bool { return len(order[a]) > len(order[b]) })
+
+	for i, s := range stripped {
+		trimmed := strings.TrimSpace(s)
+		if fb, ok := pending[trimmed]; ok {
+			// Keep the renderer's indentation; the marker's own styling is not
+			// worth reconstructing.
+			lines[i] = strings.Replace(s, trimmed, fb, 1)
+			continue
+		}
+		// A marker sharing a line with other text cannot be swapped without
+		// losing that line's styling, which still beats leaking the marker.
+		changed := false
+		for _, marker := range order {
+			if strings.Contains(s, marker) {
+				s = strings.ReplaceAll(s, marker, pending[marker])
+				changed = true
+			}
+		}
+		if changed {
+			lines[i] = s
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// fallbackText describes a media item that could not be shown as an image.
+func fallbackText(item markdown.MediaItem) string {
+	if item.Kind == markdown.KindMermaid {
+		return markdown.Placeholder
+	}
+	if item.Alt != "" {
+		return fmt.Sprintf("[image: %s (%s)]", item.Alt, item.Source)
+	}
+	return fmt.Sprintf("[image: %s]", item.Source)
+}
+
+func replaceMarkersForPagerMode(output string, markers []string, images [][]byte, maxWidths []int, imageFormat termimage.Format, width int, pagerMode pager.Mode) string {
+	if pagerMode == pager.ModeMore || pagerMode == pager.ModeLess {
+		return termimage.ReplaceMarkersWithImagesForPager(output, markers, images, maxWidths, imageFormat, width)
+	}
+	return termimage.ReplaceMarkersWithImages(output, markers, images, maxWidths, imageFormat, width)
 }
 
 // effectiveMermaidTheme resolves the configured theme. "auto" (or empty) becomes
