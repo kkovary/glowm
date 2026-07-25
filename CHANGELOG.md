@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0](https://github.com/kkovary/glowm/compare/v0.4.0...v0.5.0) (2026-07-25)
+
+
+### Features
+
+* add --watch mode for live file reload ([228544f](https://github.com/kkovary/glowm/commit/228544f0dc5b30c9b40be143691e1b0ecf42479a))
+* add less pager mode with smooth Kitty image scrolling and Mermaid theme config ([304853b](https://github.com/kkovary/glowm/commit/304853b53700a8156f8110e735a2dd6671aec7bd))
+* default to less pager and auto-detect Mermaid theme from terminal background ([b87d911](https://github.com/kkovary/glowm/commit/b87d91175461451a4f067f5585d7790483a5a6df))
+* render markdown images inline in the terminal ([7829d62](https://github.com/kkovary/glowm/commit/7829d629c56357a7efa8ced3cf405276a8daa3e4))
+* render markdown images inline in the terminal ([e053490](https://github.com/kkovary/glowm/commit/e053490d2a4d7e1ee8970a980f1a6b1644c679f1))
+
+
+### Performance Improvements
+
+* **pager:** eliminate less-mode flicker on scroll ([5db7bb1](https://github.com/kkovary/glowm/commit/5db7bb1a725fc9c534f1e14c401c3f792a383f08))
+
 ## [0.4.0](https://github.com/atani/glowm/compare/v0.3.2...v0.4.0) (2026-06-11)
 
 
